@@ -22,6 +22,8 @@ The `bc7e` artifact of a run holds one directory per platform. Each directory co
 
 The Windows DLL links the C runtime statically and depends on KERNEL32 only.
 
+ISPC running on an aarch64 host compiles `--` on varying unsigned integers to a no-op ([ispc/ispc#3882](https://github.com/ispc/ispc/issues/3882)), which corrupts bc7e's output. The fix is not in ISPC v1.31.0. On aarch64 hosts, `build.py` therefore rewrites every decrement in bc7e.ispc to the equivalent `-= 1` before compiling, and records this in `VERSION.txt`. It stops with an error if a decrement appears in a form it cannot rewrite safely.
+
 ## API
 
 ```c

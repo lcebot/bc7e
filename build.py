@@ -14,6 +14,7 @@ Outputs per platform:
 """
 import argparse
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,12 @@ SHIM = ROOT / 'src' / 'bc7e_image.c'
 X86_TARGETS = 'sse2-i32x4,sse4-i32x4,avx2-i32x8,avx512skx-x16'
 ARM_TARGETS = 'neon-i32x4'
 
+# ISPC running on an aarch64 host compiles `--` on varying unsigned integers to a no-op (ispc/ispc#3882; the fix is
+# not in v1.31.0). x86-64 hosts are unaffected. On aarch64 hosts, decrements are rewritten to the equivalent `-= 1`
+_LVALUE = r'[A-Za-z_]\w*(?:(?:->|\.)\w+|\[[^\]]*\])*'
+_RE_DECREMENT = re.compile(rf'(?:({_LVALUE})\s*--|--\s*({_LVALUE}))(?=\s*[;)])')
+_RE_COMMENT = re.compile(r'//[^\n]*|/\*.*?\*/', re.S)
+
 
 def run(*args: str | Path) -> None:
     print('>', ' '.join(str(arg) for arg in args), flush=True)
@@ -37,6 +44,18 @@ def run(*args: str | Path) -> None:
 
 def output(*args: str | Path) -> str:
     return subprocess.run([str(arg) for arg in args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def rewrite_decrements(source: Path, work: Path) -> Path:
+    """A copy of source in work with every statement or loop decrement written as `-= 1`. Raises when a decrement
+    remains in another form, since that one would be miscompiled silently"""
+    text = _RE_DECREMENT.sub(lambda match: f'{match[1] or match[2]} -= 1', source.read_bytes().decode('utf-8'))
+    if '--' in _RE_COMMENT.sub('', text):
+        raise SystemExit(f'{source.name} has a decrement that cannot be rewritten safely; see ispc/ispc#3882')
+    work.mkdir(parents=True, exist_ok=True)
+    target = work / source.name
+    target.write_bytes(text.encode('utf-8'))
+    return target
 
 
 def compile_ispc(ispc: Path, source: Path, work: Path, *, arch: str, target_os: str) -> list[Path]:
@@ -92,7 +111,11 @@ def main() -> int:
 
     shutil.rmtree(BUILD, ignore_errors=True)
     work = BUILD / name
-    objects = compile_ispc(ispc, args.upstream / 'bc7e.ispc', work, arch=arch, target_os=target_os)
+    source = args.upstream / 'bc7e.ispc'
+    host_is_arm = machine in ('arm64', 'aarch64')
+    if host_is_arm:
+        source = rewrite_decrements(source, work)
+    objects = compile_ispc(ispc, source, work, arch=arch, target_os=target_os)
     target_dir = DIST / name
     shutil.rmtree(target_dir, ignore_errors=True)
     target_dir.mkdir(parents=True)
@@ -102,7 +125,8 @@ def main() -> int:
     shutil.copyfile(args.upstream / 'LICENSE', target_dir / 'LICENSE')
     commit = output('git', '-C', args.upstream, 'log', '-1', '--format=%H %cs')
     ispc_version = output(ispc, '--version').splitlines()[0]
-    (target_dir / 'VERSION.txt').write_text(f'bc7enc_rdo {commit}\n{ispc_version}\n', encoding='utf-8')
+    workaround = 'decrements rewritten for ispc/ispc#3882\n' if host_is_arm else ''
+    (target_dir / 'VERSION.txt').write_text(f'bc7enc_rdo {commit}\n{ispc_version}\n{workaround}', encoding='utf-8')
     print(f'built {target_dir / file_name}')
     return 0
 
