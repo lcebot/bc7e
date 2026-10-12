@@ -1,0 +1,89 @@
+# bc7e shared libraries for every platform. Each run builds the latest bc7enc_rdo commit on its default branch with the
+# latest ISPC release; VERSION.txt in each artifact records both
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    # Monthly rebuild to pick up upstream changes
+    - cron: '0 0 1 * *'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win-x64
+            ispc: ispc-v*-windows.zip
+          - os: ubuntu-24.04
+            platform: linux-x64
+            ispc: ispc-v*-linux.tar.gz
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            ispc: ispc-v*-linux.aarch64.tar.gz
+          - os: macos-15
+            platform: osx-arm64
+            ispc: ispc-v*-macOS.arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: richgel999/bc7enc_rdo
+          path: upstream
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Download the latest ISPC release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo ispc/ispc --pattern '${{ matrix.ispc }}' --dir ispc-download
+          python -c "import glob, shutil; shutil.unpack_archive(glob.glob('ispc-download/*')[0], 'ispc')"
+          ispc=$(python -c "import glob; print((glob.glob('ispc/*/bin/ispc') + glob.glob('ispc/*/bin/ispc.exe'))[0])")
+          chmod +x "$ispc"
+          echo "ISPC=$ispc" >> "$GITHUB_ENV"
+      - name: Build
+        if: runner.os != 'Windows'
+        run: python build.py --upstream upstream --ispc "$ISPC"
+      - name: Build (MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          python build.py --upstream upstream --ispc $env:ISPC
+      - name: Show versions and dependencies
+        run: |
+          cat dist/${{ matrix.platform }}/VERSION.txt
+          case "$RUNNER_OS" in
+            Linux) objdump -T dist/${{ matrix.platform }}/libbc7e.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 ;;
+            macOS) otool -L dist/${{ matrix.platform }}/libbc7e.dylib ;;
+          esac
+      - name: Smoke test
+        run: |
+          python -m pip install numpy pillow
+          python smoke_test.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/${{ matrix.platform }}
+
+  # One bc7e artifact holding the win-x64, linux-x64, linux-arm64 and osx-arm64 directories
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact/merge@v4
+        with:
+          name: bc7e
+          separate-directories: true
+          delete-merged: true
